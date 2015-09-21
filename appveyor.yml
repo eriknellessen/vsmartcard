@@ -3,6 +3,14 @@ platform:
   - x64
 
 environment:
+  PATH: C:\cygwin\bin;C:\cccl;%PATH%
+  CYGWIN: nodosfilewarning
+  CCCL_OPTIONS: --cccl-muffle /W3 /D_CRT_SECURE_NO_DEPRECATE /DWIN32_LEAN_AND_MEAN
+  CC: cccl
+  CXX: cccl
+  LD: cccl
+  OPENSSL_VER: 1_0_2d
+
   matrix:
     - VSVER: 14
     - VSVER: 12
@@ -17,20 +25,93 @@ matrix:
 install:
   - date /T & time /T
   - ps: >-
+      If(!(Test-Path -Path "C:\cccl" )) {
+        git clone -q --depth=1 git://github.com/swig/cccl.git "C:\cccl"
+      }
+  - ps: >-
       If ($env:Platform -Match "x86") {
         $env:VCVARS_PLATFORM="x86"
+        $env:OPENSSL_PF="Win32"
+        $env:OPENSC_NMAKE_ARCH=""
+        $env:ARTIFACT="${env:APPVEYOR_PROJECT_NAME}-${env:APPVEYOR_BUILD_VERSION}_win32-vs${env:VSVER}"
         $env:MSBUILD_PLATFORM="Win32"
       } Else {
         $env:VCVARS_PLATFORM="amd64"
+        $env:OPENSSL_PF="Win64"
+        $env:OPENSC_NMAKE_ARCH="BUILD_ON=WIN64 BUILD_FOR=WIN64"
+        $env:ARTIFACT="${env:APPVEYOR_PROJECT_NAME}-${env:APPVEYOR_BUILD_VERSION}_win32-vs${env:VSVER}"
         $env:MSBUILD_PLATFORM="x64"
       }
   - ps: $env:VSCOMNTOOLS=(Get-Content ("env:VS" + "$env:VSVER" + "0COMNTOOLS"))
   - echo "Using Visual Studio %VSVER%.0 at %VSCOMNTOOLS%"
   - call "%VSCOMNTOOLS%\..\..\VC\vcvarsall.bat" %VCVARS_PLATFORM%
+  - ps: >-
+      If(!(Test-Path -Path "C:\OpenSSL-${env:OPENSSL_PF}" )) {
+          Start-FileDownload https://slproweb.com/download/${env:OPENSSL_PF}OpenSSL-${env:OPENSSL_VER}.exe -FileName C:\WinOpenSSL.exe
+          C:\WinOpenSSL.exe /SILENT /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART
+          dir C:
+        }
+  - ps: >-
+      If(!(Test-Path -Path "C:\gengetopt" )) {
+        git clone -q --depth=1 git://git.savannah.gnu.org/gengetopt.git
+        bash -c "exec 0</dev/null && unset CC CXX LD && cd gengetopt && autoreconf -i >> /tmp/ggout 2>&1 && ./configure --prefix=C:/gengetopt >> /tmp/ggout 2>&1 && make install >> /tmp/ggout 2>&1 || cat /tmp/ggout"
+      }
+  - ps: >-
+      If(!(Test-Path -Path "C:\OpenPACE" )) {
+        git clone -q --depth=1 https://github.com/frankmorgner/openpace.git
+        bash -c "cd openpace && autoreconf -i"
+        bash -c "touch openpace/src/cvc-create.1 openpace/src/cvc-print.1"
+        # Open dummy file descriptor to fix error on cygwin: Bad file descriptor
+        bash -c "exec 0</dev/null && cd openpace && ./configure GENGETOPT='C:/gengetopt/bin/gengetopt --include-getopt' CRYPTO_LIBS='-LC:/OpenSSL-${OPENSSL_PF}/lib -llibeay32' CRYPTO_CFLAGS='-IC:/OpenSSL-${OPENSSL_PF}/include' --prefix=C:/OpenPACE || cat config.log"
+        bash -c "exec 0</dev/null && make install -C openpace"
+      }
+  - ps: >-
+      If(!(Test-Path -Path "C:\OpenSC" )) {
+        bash -c "grep _sc_card_add_ec_alg npa/src/opensc/src/libopensc/libopensc.exports || echo _sc_card_add_ec_alg >> npa/src/opensc/src/libopensc/libopensc.exports"
+        bash -c "grep _sc_card_add_rsa_alg npa/src/opensc/src/libopensc/libopensc.exports || echo _sc_card_add_rsa_alg >> npa/src/opensc/src/libopensc/libopensc.exports"
+        bash -c "grep _sc_match_atr npa/src/opensc/src/libopensc/libopensc.exports || echo _sc_match_atr >> npa/src/opensc/src/libopensc/libopensc.exports"
+        bash -c "grep sc_apdu_get_octets npa/src/opensc/src/libopensc/libopensc.exports || echo sc_apdu_get_octets >> npa/src/opensc/src/libopensc/libopensc.exports"
+        bash -c "grep sc_pkcs15_pincache_add npa/src/opensc/src/libopensc/libopensc.exports || echo sc_pkcs15_pincache_add >> npa/src/opensc/src/libopensc/libopensc.exports"
+        bash -c "exec 0</dev/null && cd npa/src/opensc && ./bootstrap"
+        # disable features to speed up the script
+        bash -c "exec 0</dev/null && cd npa/src/opensc && ./configure --disable-openssl --disable-readline --disable-zlib || cat config.log"
+        cd npa/src/opensc/win32 && nmake /f Makefile.mak %OPENSC_NMAKE_ARCH% OpenSC.msi
+        bash -c "mkdir C:/OpenSC && cp npa/src/opensc/win32/OpenSC.msi C:/OpenSC/"
+      }
+  - bash -c "which cl.exe"
+  - bash -c "cl.exe /? 2>&1 | head -n 2"
+  - bash -c "which csc.exe"
+  - bash -c "csc.exe /? | head -n 2"
+  - bash -c "which cccl"
+  - bash -c "cccl --version"
+  - make --version
+  - uname -a
+
+build_script:
   - ps: $env:PATH="${env:ProgramFiles(x86)}\Windows Kits\8.1\bin\x86;${env:PATH}"
   - NMake2MSBuild.exe virtualsmartcard\win32\BixVReader\WinXP\sources
   - ProjectUpgradeTool.exe virtualsmartcard\win32\BixVReader\WinXP
-
-build_script:
   - msbuild virtualsmartcard\win32\BixVReader\WinXP\BixVReader.sln /p:Configuration="Win7 Debug" /p:Platform=%MSBUILD_PLATFORM%
   - msbuild virtualsmartcard\win32\vpcd-config\vpcd-config.sln /p:Configuration="Debug" /p:Platform=Win32
+  - bash -c "cd npa && autoreconf -i"
+  - bash -c "touch npa/src/npa-tool.1"
+    # Open dummy file descriptor to fix error on cygwin: Bad file descriptor
+  - bash -c "exec 0</dev/null && cd npa && ./configure GENGETOPT='C:/gengetopt/bin/gengetopt --include-getopt' CRYPTO_LIBS='-LC:/OpenSSL-$OPENSSL_PF/lib -llibeay32' CRYPTO_CFLAGS='-IC:/OpenSSL-$OPENSSL_PF/include' OPENSC_LIBS=-L$(pwd)/npa/src/opensc/src/libopensc -lopensc" --prefix=/ || cat config.log"
+  - bash -c "exec 0</dev/null && make install DESTDIR=C:/$ARTIFACT"
+  - bash -c "cp -nr C:/OpenSSL-$OPENSSL_PF/* C:/$ARTIFACT"
+  - bash -c "cp -nr C:/OpenPACE/* C:/$ARTIFACT"
+  - bash -c "cp -nr C:/OpenSC/OpenSC.msi C:/$ARTIFACT"
+
+cache:
+  - C:\OpenPACE
+  - C:\OpenSC
+  - C:\OpenSSL-Win32
+  - C:\OpenSSL-Win64
+  - C:\cccl
+  - C:\gengetopt
+
+notifications:
+  - provider: Email
+    on_build_success: false
+    on_build_failure: false
+    on_build_status_changed: true
